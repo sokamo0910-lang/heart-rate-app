@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Heart Rate Monitor</title>
+<style>
+  body {
+    font-family: "Segoe UI", sans-serif;
+    background: #f5f7fa;
+    margin: 0;
+    padding: 20px;
+    display: flex;
+    justify-content: center;
+  }
+  .card {
+    width: 100%;
+    max-width: 500px;
+    background: white;
+    padding: 25px;
+    border-radius: 20px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+  }
+  h2 {
+    margin-top: 0;
+    text-align: center;
+  }
+  video, canvas {
+    display: none;
+  }
+  .controls {
+    margin: 20px 0;
+  }
+  select, button {
+    width: 100%;
+    padding: 12px;
+    margin: 8px 0;
+    border: none;
+    font-size: 16px;
+    border-radius: 10px;
+  }
+  button {
+    background: #007aff;
+    color: white;
+    font-weight: bold;
+  }
+  button:disabled {
+    background: #ccc;
+  }
+  #bpm {
+    font-size: 54px;
+    text-align: center;
+    margin: 10px 0;
+    font-weight: bold;
+  }
+  #progress {
+    width: 100%;
+    height: 12px;
+    background: #eee;
+    border-radius: 10px;
+    overflow: hidden;
+    margin-top: 10px;
+  }
+  #progress-bar {
+    height: 100%;
+    width: 0%;
+    background: #007aff;
+  }
+</style>
+</head>
+<body>
+
+<div class="card">
+  <h2>Heart Rate Monitor</h2>
+
+  <div class="controls">
+    <label>計測時間</label>
+    <select id="durationSelect">
+      <option value="1">1分</option>
+      <option value="3">3分</option>
+      <option value="7" selected>7分</option>
+      <option value="10">10分</option>
+    </select>
+
+    <label>サンプリングレート (fps)</label>
+    <select id="fpsSelect">
+      <option value="15">15 fps</option>
+      <option value="30" selected>30 fps</option>
+      <option value="60">60 fps</option>
+    </select>
+
+    <button id="startBtn">計測開始</button>
+    <button id="csvBtn" disabled>CSVエクスポート</button>
+  </div>
+
+  <div id="bpm">--</div>
+
+  <div id="progress">
+    <div id="progress-bar"></div>
+  </div>
+
+  <video id="video" autoplay></video>
+  <canvas id="canvas"></canvas>
+
+  <canvas id="chartCanvas"></canvas>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<script>
+let stream, track;
+let brightnessData = [];
+let bpmLog = [];
+let chart;
+
+// 計測開始
+document.getElementById("startBtn").onclick = startMeasurement;
+
+async function startMeasurement() {
+  const durationMin = Number(document.getElementById("durationSelect").value);
+  const fps = Number(document.getElementById("fpsSelect").value);
+
+  const duration = durationMin * 60 * 1000;
+  const interval = 1000 / fps;
+
+  bpmLog = [];
+  brightnessData = [];
+  updateBPM("--");
+
+  disableUI(true);
+
+  stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: "environment" }
+  });
+  track = stream.getVideoTracks()[0];
+
+  try {
+    await track.applyConstraints({ advanced: [{ torch: true }] });
+  } catch (e) {}
+
+  const video = document.getElementById("video");
+  video.srcObject = stream;
+
+  measureBrightness(interval);
+
+  const startTime = Date.now();
+  const progressBar = document.getElementById("progress-bar");
+
+  const timer = setInterval(() => {
+    const elapsed = Date.now() - startTime;
+    progressBar.style.width = (elapsed / duration) * 100 + "%";
+
+    if (elapsed >= duration) {
+      clearInterval(timer);
+      stopMeasurement();
+    }
+  }, 100);
+}
+
+// 輝度計測
+function measureBrightness(interval) {
+  const video = document.getElementById("video");
+  const canvas = document.getElementById("canvas");
+  const ctx = canvas.getContext("2d");
+
+  canvas.width = 200;
+  canvas.height = 200;
+
+  const step = () => {
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = frame.data;
+    let sum = 0;
+
+    for (let i = 0; i < data.length; i += 4) sum += data[i];
+
+    const avg = sum / (data.length / 4);
+    brightnessData.push(avg);
+
+    if (brightnessData.length > 60) {
+      const bpm = detectBPM(brightnessData);
+      if (bpm) {
+        updateBPM(bpm);
+        bpmLog.push(bpm);
+      }
+      brightnessData = brightnessData.slice(-200);
+    }
+  };
+
+  const loop = () => {
+    step();
+    setTimeout(loop, interval);
+  };
+  loop();
+}
+
+// BPM計算
+function detectBPM(arr) {
+  let peaks = 0;
+  for (let i = 1; i < arr.length - 1; i++) {
+    if (arr[i] > arr[i - 1] && arr[i] > arr[i + 1]) peaks++;
+  }
+  const seconds = arr.length / 30;
+  if (seconds === 0) return null;
+  return Math.round((peaks / seconds) * 60);
+}
+
+// UI BPM表示更新
+function updateBPM(val) {
+  document.getElementById("bpm").textContent = val + (val === "--" ? "" : " BPM");
+}
+
+// 計測終了
+function stopMeasurement() {
+  track.stop();
+  disableUI(false);
+  document.getElementById("progress-bar").style.width = "0%";
+
+  drawChart();
+}
+
+// UI有効/無効
+function disableUI(disabled) {
+  document.getElementById("startBtn").disabled = disabled;
+  document.getElementById("csvBtn").disabled = disabled || bpmLog.length === 0;
+  document.getElementById("durationSelect").disabled = disabled;
+  document.getElementById("fpsSelect").disabled = disabled;
+}
+
+// グラフ描画
+function drawChart() {
+  const ctx = document.getElementById("chartCanvas");
+
+  if (chart) chart.destroy();
+
+  chart = new Chart(ctx, {
+    type: "line",
+    data: {
+      labels: bpmLog.map((_, i) => i),
+      datasets: [{
+        label: "BPM",
+        data: bpmLog,
+        borderWidth: 2
+      }]
+    }
+  });
+
+  document.getElementById("csvBtn").disabled = false;
+}
+
+// CSVエクスポート
+document.getElementById("csvBtn").onclick = () => {
+  let csv = "index,BPM\n";
+  bpmLog.forEach((bpm, i) => {
+    csv += `${i},${bpm}\n`;
+  });
+
+  const blob = new Blob([csv], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "heart_rate.csv";
+  a.click();
+  URL.revokeObjectURL(url);
+};
+</script>
+
+</body>
+</html>
